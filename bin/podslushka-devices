@@ -1,0 +1,7 @@
+#!/bin/bash
+# Список аудиоустройств. ffmpeg после вывода списка всегда завершается ошибкой —
+# это его штатное поведение, её отбрасываем.
+ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 \
+  | sed -n '/AVFoundation/,$p' \
+  | grep -v "Error opening input" \
+  | sed 's/\[AVFoundation indev @ [^]]*\] //'

@@ -1,0 +1,16 @@
+#!/bin/bash
+# Картотека записей в браузере. Слушает только 127.0.0.1.
+HOME_DIR="${PODSLUSHKA_HOME:-$HOME/.podslushka}"
+PORT="${PODSLUSHKA_PORT:-8477}"
+DIR="${PODSLUSHKA_DIR:-$HOME/Documents/Подслушка}"
+PY="$HOME_DIR/venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3)"
+
+if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/api/calls"; then
+  echo "Уже запущено, открываю."
+  open "http://127.0.0.1:$PORT"
+  exit 0
+fi
+
+( sleep 1; open "http://127.0.0.1:$PORT" ) &
+exec "$PY" "$HOME_DIR/lib/server.py" --port "$PORT" --dir "$DIR"
