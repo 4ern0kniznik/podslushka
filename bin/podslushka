@@ -1,5 +1,5 @@
 #!/bin/bash
-# Подслушка — тумблер записи звонка: start | stop | status | toggle | doctor
+# Подслушка — тумблер записи звонка: start | stop | status | toggle | doctor | fix-audio
 # Пишет микрофон и звук системы через агрегатное устройство "Podslushka In",
 # после стопа сразу расшифровывает локальным faster-whisper.
 
@@ -131,12 +131,23 @@ do_setup() {
   echo "  \"$APP\" --mic \"Микрофон MacBook Pro\" --out \"Динамики MacBook Pro\" --make-devices"
 }
 
+do_fix_audio() {
+  APP="$HOME/Applications/Podslushka.app/Contents/MacOS/Podslushka"
+  if [ -x "$APP" ]; then
+    "$APP" --restore-output
+  else
+    echo "нет приложения. Верни выход вручную: Option и клик по значку звука в строке меню."
+    exit 1
+  fi
+}
+
 case "${1:-toggle}" in
   doctor) do_doctor; exit $? ;;
+  fix-audio) do_fix_audio; exit $? ;;
   setup) do_setup ;;
   start) do_start ;;
   stop) do_stop ;;
   status) is_running && echo "пишется: $(cat "$CUR_FILE")" || echo "простой" ;;
   toggle) is_running && do_stop || do_start ;;
-  *) echo "podslushka [toggle|start|stop|status|doctor|setup]"; exit 2 ;;
+  *) echo "podslushka [toggle|start|stop|status|doctor|setup|fix-audio]"; exit 2 ;;
 esac

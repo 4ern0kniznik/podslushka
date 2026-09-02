@@ -195,6 +195,14 @@ final class App: NSObject, NSApplicationDelegate {
             for d in CA.outputs() { print("  " + CA.name(d)) }
             didWork = true
         }
+        if args.contains("--restore-output") {
+            if let name = restoreOutputNow() {
+                print("выход возвращён на \(name)")
+            } else {
+                print("не нашёл, куда возвращать — выбери выход вручную")
+            }
+            didWork = true
+        }
         if args.contains("--make-devices") {
             makeDevices(silent: true)
             didWork = true
@@ -215,6 +223,7 @@ final class App: NSObject, NSApplicationDelegate {
         redrawIcon()
         rebuildMenu()
         if panelVisible { buildPanel() }
+        fixStuckOutput()
         menu.delegate = self
         item.menu = menu
         dbg("=== старт, pid \(ProcessInfo.processInfo.processIdentifier), кнопка: \(item.button != nil ? "есть" : "НЕТ"), пунктов \(menu.numberOfItems), политика \(inDock ? "dock" : "меню")")
@@ -408,6 +417,10 @@ final class App: NSObject, NSApplicationDelegate {
             : String(format: "%d:%02d", v / 60, v % 60)
     }
 
+    func applicationWillTerminate(_ n: Notification) {
+        restoreOutput()
+    }
+
     // MARK: меню
 
     func rebuildMenu() {
@@ -447,6 +460,14 @@ final class App: NSObject, NSApplicationDelegate {
                                    current: micName, action: #selector(pickMic(_:))))
         menu.addItem(deviceSubmenu(title: "Слушать через", devices: CA.outputs().filter { CA.name($0) != "Podslushka Out" },
                                    current: outName, action: #selector(pickOut(_:))))
+
+        if CA.name(CA.defaultOutput) == "Podslushka Out" {
+            let fix = NSMenuItem(title: "Вернуть звук на \(outName)",
+                                 action: #selector(restoreOutputFromMenu), keyEquivalent: "")
+            fix.target = self
+            menu.addItem(fix)
+            menu.addItem(.separator())
+        }
 
         let pan = NSMenuItem(title: "Показывать панель", action: #selector(togglePanel), keyEquivalent: "")
         pan.target = self
@@ -513,13 +534,56 @@ final class App: NSObject, NSApplicationDelegate {
 
     @objc func toggle() { dbg("нажато: запись/стоп"); recording ? stop() : start() }
 
+    /// Прежний выход запоминается на диске: если приложение закроют во время
+    /// записи, вернуть звук сможет следующий запуск. Пока выбран составной
+    /// выход, клавиши громкости не работают — macOS не умеет крутить громкость
+    /// агрегата, поэтому зависший выход выглядит как поломка звука.
+    func rememberOutput(_ id: AudioObjectID) {
+        savedOutput = id
+        if let uid = CA.uid(id) { defaults.set(uid, forKey: "prevOutputUID") }
+    }
+
+    @discardableResult
+    func restoreOutputNow() -> String? {
+        var target: AudioObjectID? = savedOutput
+        if target == nil, let uid = defaults.string(forKey: "prevOutputUID") {
+            target = CA.allDevices().first { CA.uid($0) == uid }
+        }
+        if target == nil, let byName = CA.find(name: outName) { target = byName }
+        guard let id = target else { return nil }
+        CA.defaultOutput = id
+        savedOutput = nil
+        defaults.removeObject(forKey: "prevOutputUID")
+        dbg("выход возвращён на \(CA.name(id))")
+        return CA.name(id)
+    }
+
+    /// Звук мог остаться на составном выходе после падения или закрытия
+    /// приложения во время записи. Если запись не идёт — возвращаем.
+    func fixStuckOutput() {
+        guard externalPID == nil else { return }
+        let cur = CA.defaultOutput
+        guard CA.name(cur) == "Podslushka Out" else { return }
+        if let name = restoreOutputNow() {
+            dbg("выход был залипшим, вернули на \(name)")
+        }
+    }
+
+    @objc func restoreOutputFromMenu() {
+        if let name = restoreOutputNow() {
+            alert("Звук возвращён", "Выход снова \(name). Клавиши громкости работают.")
+        } else {
+            alert("Некуда возвращать", "Не нашёл прежнее устройство. Выбери выход вручную: Option и клик по значку звука.")
+        }
+    }
+
     func start() {
         guard CA.find(name: "Podslushka In") != nil else {
             return alert("Нет устройства Podslushka In",
                          "Нажми «Создать аудиоустройства» — оно соберёт Podslushka In и Podslushka Out.")
         }
         if autoSwitch, let target = CA.find(name: "Podslushka Out") {
-            savedOutput = CA.defaultOutput
+            rememberOutput(CA.defaultOutput)
             CA.defaultOutput = target
         }
         run(["start"]) { [weak self] ok in
@@ -552,7 +616,9 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func restoreOutput() {
-        if let s = savedOutput { CA.defaultOutput = s; savedOutput = nil }
+        if savedOutput != nil || defaults.string(forKey: "prevOutputUID") != nil {
+            restoreOutputNow()
+        }
     }
 
     @objc func openUI() {
