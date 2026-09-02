@@ -82,10 +82,16 @@ else
 fi
 
 say "Модель распознавания ($MODEL, около 1,5 ГБ)"
-printf '   Скачать сейчас? [Y/n] '
-read -r ans
+CACHE="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-$MODEL"
+if [ -d "$CACHE" ]; then
+  ok "уже скачана"
+  ans=n
+else
+  printf '   Скачать сейчас? [Y/n] '
+  read -r ans
+fi
 case "${ans:-y}" in
-  [Nn]*) echo "   пропущено — скачается сама при первой расшифровке" ;;
+  [Nn]*) [ -d "$CACHE" ] || echo "   пропущено — скачается сама при первой расшифровке" ;;
   *) "$HOME_DIR/venv/bin/python" - <<PY || echo "   не скачалось, попробуется при первой записи"
 from faster_whisper import WhisperModel
 WhisperModel("$MODEL", device="cpu", compute_type="int8")

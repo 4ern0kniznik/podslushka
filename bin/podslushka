@@ -115,7 +115,7 @@ do_doctor() {
   check "драйвер BlackHole 2ch"  "test -d /Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver"
   check "python окружения"       "test -x '$WHISPER_PY'"
   check "faster-whisper"         "'$WHISPER_PY' -c 'import faster_whisper'"
-  check "устройство «$DEVICE_NAME»" "test -n \"\$(find_device_index)\""
+  check "устройство ${DEVICE_NAME}" "test -n \"\$(find_device_index)\""
   check "папка записей"          "test -d '$BASE_DIR' || mkdir -p '$BASE_DIR'"
   echo
   if [ "$ok" = 0 ]; then echo "Всё на месте."; else echo "Чего-то не хватает — запусти install.sh"; fi
