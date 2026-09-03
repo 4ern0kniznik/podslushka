@@ -8,7 +8,7 @@ set -uo pipefail
 
 HOME_DIR="${PODSLUSHKA_HOME:-$HOME/.podslushka}"
 DEVICE_NAME="${PODSLUSHKA_DEVICE:-Podslushka In}"
-BASE_DIR="${PODSLUSHKA_DIR:-$HOME/Documents/Подслушка}"
+BASE_DIR="${PODSLUSHKA_DIR:-$HOME/Подслушка}"
 STATE_DIR="/tmp/podslushka"
 PID_FILE="$STATE_DIR/ffmpeg.pid"
 CUR_FILE="$STATE_DIR/current"

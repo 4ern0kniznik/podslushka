@@ -3,7 +3,7 @@
 set -uo pipefail
 
 HOME_DIR="${PODSLUSHKA_HOME:-$HOME/.podslushka}"
-REC_DIR="${PODSLUSHKA_DIR:-$HOME/Documents/Подслушка}"
+REC_DIR="${PODSLUSHKA_DIR:-$HOME/Подслушка}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 MODEL="${PODSLUSHKA_MODEL:-medium}"
 

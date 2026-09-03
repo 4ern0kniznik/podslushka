@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Подслушка: локальный плеер и картотека записей. Только стандартная библиотека.
 
-  python3 server.py [--port 8477] [--dir ~/Documents/Calls]
+  python3 server.py [--port 8477] [--dir ~/Подслушка]
 
 Слушает только 127.0.0.1. Наружу ничего не отдаёт.
 """
@@ -22,7 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 BASE = Path(os.path.expanduser(
-    os.environ.get("PODSLUSHKA_DIR", "~/Documents/Подслушка")))
+    os.environ.get("PODSLUSHKA_DIR", "~/Подслушка")))
 HOME_DIR = Path(os.path.expanduser(
     os.environ.get("PODSLUSHKA_HOME", "~/.podslushka")))
 WHISPER_PY = HOME_DIR / "venv" / "bin" / "python"

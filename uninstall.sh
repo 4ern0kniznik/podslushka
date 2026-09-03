@@ -12,7 +12,7 @@ done
 defaults delete local.podslushka.app 2>/dev/null
 
 echo "Удалено. Что осталось намеренно:"
-echo "  записи в ~/Documents/Подслушка"
+echo "  записи в ~/Подслушка"
 echo "  ffmpeg и BlackHole — общие инструменты, сноси вручную, если не нужны:"
 echo "    brew uninstall ffmpeg"
 echo "    brew uninstall --cask blackhole-2ch"

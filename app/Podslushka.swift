@@ -631,7 +631,7 @@ final class App: NSObject, NSApplicationDelegate {
     @objc func openFolder() {
         NSWorkspace.shared.open(URL(fileURLWithPath:
             NSString(string: ProcessInfo.processInfo.environment["PODSLUSHKA_DIR"]
-                     ?? "~/Documents/Подслушка").expandingTildeInPath))
+                     ?? "~/Подслушка").expandingTildeInPath))
     }
 
     @objc func makeDevicesFromMenu() {
