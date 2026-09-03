@@ -1,5 +1,6 @@
 #!/bin/bash
-# Подслушка — тумблер записи звонка: start | stop | status | toggle | doctor | fix-audio
+# Подслушка — запись звонка и протокол
+# start | stop | status | toggle | doctor | setup | fix-audio | protocol | pdf
 # Пишет микрофон и звук системы через агрегатное устройство "Podslushka In",
 # после стопа сразу расшифровывает локальным faster-whisper.
 
@@ -14,6 +15,10 @@ CUR_FILE="$STATE_DIR/current"
 LOG_FILE="$STATE_DIR/ffmpeg.log"
 WHISPER_PY="$HOME_DIR/venv/bin/python"
 TRANSCRIBE="$HOME_DIR/lib/transcribe.py"
+PROTOCOL="$HOME_DIR/lib/protocol.py"
+TOPDF="$HOME_DIR/lib/topdf.py"
+MODEL2="${PODSLUSHKA_MODEL2:-large-v3}"
+SECOND_PASS="${PODSLUSHKA_SECOND_PASS:-1}"
 PEAKS="$HOME_DIR/lib/make_peaks.py"
 KEEP_WAV="${PODSLUSHKA_KEEP_WAV:-0}"
 
@@ -102,9 +107,50 @@ do_stop() {
     fi
   fi
 
+  AUDIO="$OUT_DIR/audio.m4a"; [ -f "$AUDIO" ] || AUDIO="$WAV"
+
+  # Второй проход точной моделью идёт в фоне: черновик уже есть, а точный текст
+  # подъезжает позже и перезаписывает transcript.*. Черновик остаётся рядом.
+  if [ "$SECOND_PASS" = "1" ] && [ -n "$MODEL2" ] && [ "$MODEL2" != "${PODSLUSHKA_MODEL:-medium}" ]; then
+    cp -f "$OUT_DIR/transcript.txt" "$OUT_DIR/transcript-draft.txt" 2>/dev/null
+    nohup bash -c "
+      PODSLUSHKA_MODEL='$MODEL2' '$WHISPER_PY' '$TRANSCRIBE' '$AUDIO' \
+        && osascript -e 'display notification \"Точная расшифровка готова\" with title \"Подслушка\"' \
+        || osascript -e 'display notification \"Второй проход не удался\" with title \"Подслушка\"'
+    " > "$OUT_DIR/second-pass.log" 2>&1 &
+    echo "  второй проход ($MODEL2) идёт в фоне, журнал: $OUT_DIR/second-pass.log"
+  fi
+
   echo "Готово: $OUT_DIR"
   notify "" "Транскрипт готов"
   open "$OUT_DIR"
+}
+
+last_dir() { ls -dt "$BASE_DIR"/*/ 2>/dev/null | head -1; }
+
+pick_dir() {
+  if [ -n "${1:-}" ]; then
+    echo "$1"
+  else
+    local d; d="$(last_dir)"
+    [ -n "$d" ] || { echo "записей нет" >&2; exit 1; }
+    echo "${d%/}"
+  fi
+}
+
+do_protocol() {
+  local D; D="$(pick_dir "${1:-}")"
+  echo "Протокол по $D"
+  "$WHISPER_PY" "$PROTOCOL" "$D" || exit 1
+  if [ -f "$D/protocol.md" ]; then
+    "$WHISPER_PY" "$TOPDF" "$D/protocol.md" "$D/protocol.pdf" && open "$D"
+  fi
+}
+
+do_pdf() {
+  local D; D="$(pick_dir "${1:-}")"
+  [ -f "$D/protocol.md" ] || { echo "нет $D/protocol.md — сначала podslushka protocol"; exit 1; }
+  "$WHISPER_PY" "$TOPDF" "$D/protocol.md" "$D/protocol.pdf" && open "$D"
 }
 
 do_doctor() {
@@ -117,6 +163,17 @@ do_doctor() {
   check "faster-whisper"         "'$WHISPER_PY' -c 'import faster_whisper'"
   check "устройство ${DEVICE_NAME}" "test -n \"\$(find_device_index)\""
   check "папка записей"          "test -d '$BASE_DIR' || mkdir -p '$BASE_DIR'"
+  echo "  ---- для протоколов, не обязательно ----"
+  if [ -d "$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-$MODEL2" ]; then
+    echo "  есть   точная модель $MODEL2"
+  else
+    echo "  нет    точной модели $MODEL2 — скачается при первом втором проходе"
+  fi
+  if command -v ollama >/dev/null; then
+    echo "  есть   ollama, протокол соберётся офлайн"
+  else
+    echo "  нет    ollama — протокол выйдет заготовкой для внешней модели"
+  fi
   echo
   if [ "$ok" = 0 ]; then echo "Всё на месте."; else echo "Чего-то не хватает — запусти install.sh"; fi
   return $ok
@@ -144,10 +201,12 @@ do_fix_audio() {
 case "${1:-toggle}" in
   doctor) do_doctor; exit $? ;;
   fix-audio) do_fix_audio; exit $? ;;
+  protocol) shift; do_protocol "${1:-}"; exit $? ;;
+  pdf) shift; do_pdf "${1:-}"; exit $? ;;
   setup) do_setup ;;
   start) do_start ;;
   stop) do_stop ;;
   status) is_running && echo "пишется: $(cat "$CUR_FILE")" || echo "простой" ;;
   toggle) is_running && do_stop || do_start ;;
-  *) echo "podslushka [toggle|start|stop|status|doctor|setup|fix-audio]"; exit 2 ;;
+  *) echo "podslushka [toggle|start|stop|status|doctor|setup|fix-audio|protocol|pdf]"; exit 2 ;;
 esac

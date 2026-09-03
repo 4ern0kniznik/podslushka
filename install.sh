@@ -100,6 +100,25 @@ PY
   ;;
 esac
 
+say "Точная модель для второго прохода (large-v3, около 3 ГБ)"
+CACHE2="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3"
+if [ -d "$CACHE2" ]; then
+  ok "уже скачана"
+else
+  echo "   После каждой записи вторым проходом идёт точная расшифровка."
+  printf '   Скачать модель сейчас? [y/N] '
+  read -r ans2
+  case "${ans2:-n}" in
+    [Yy]*) "$HOME_DIR/venv/bin/python" - <<PY2 || echo "   не скачалось, попробуется при первой записи"
+from faster_whisper import WhisperModel
+WhisperModel("large-v3", device="cpu", compute_type="int8")
+print("   модель на месте")
+PY2
+    ;;
+    *) echo "   пропущено — скачается сама при первом втором проходе" ;;
+  esac
+fi
+
 say "Готово"
 if [ "${BH_FRESH:-0}" = 1 ]; then
   echo "   Драйвер только что поставлен. Выполни, чтобы система его увидела:"
@@ -114,4 +133,11 @@ cat <<'NEXT'
 
    Записать без интерфейса:  podslushka        (второй раз — стоп)
    Посмотреть записи:        podslushka-ui
+   Протокол встречи в PDF:   podslushka protocol
+
+   Протокол пишет языковая модель. Полностью офлайн — через ollama:
+     brew install ollama && ollama serve &
+     ollama pull qwen2.5:7b
+   Без него команда сделает заготовку с расшифровкой, её можно отдать
+   любой внешней модели, а ответ положить в protocol.md рядом.
 NEXT
