@@ -126,30 +126,39 @@ do_stop() {
   open "$OUT_DIR"
 }
 
-last_dir() { ls -dt "$BASE_DIR"/*/ 2>/dev/null | head -1; }
-
+# Выбранная папка кладётся в DIR, а не печатается: подстановка $(...) уходит
+# в подоболочку, и выход по ошибке оттуда не останавливает вызывающего.
+DIR=""
 pick_dir() {
   if [ -n "${1:-}" ]; then
-    echo "$1"
-  else
-    local d; d="$(last_dir)"
-    [ -n "$d" ] || { echo "записей нет" >&2; exit 1; }
-    echo "${d%/}"
+    DIR="${1%/}"
+    [ -d "$DIR" ] || { echo "нет папки: $DIR"; return 1; }
+    return 0
   fi
+  local d
+  d="$(ls -dt "$BASE_DIR"/*/ 2>/dev/null | head -1)"
+  if [ -z "$d" ]; then
+    echo "В $BASE_DIR записей нет."
+    echo "Если записи лежат в другом месте, укажи папку явно или задай PODSLUSHKA_DIR."
+    return 1
+  fi
+  DIR="${d%/}"
 }
 
 do_protocol() {
-  local D; D="$(pick_dir "${1:-}")"
+  pick_dir "${1:-}" || return 1
+  local D="$DIR"
   echo "Протокол по $D"
-  "$WHISPER_PY" "$PROTOCOL" "$D" || exit 1
+  "$WHISPER_PY" "$PROTOCOL" "$D" || return 1
   if [ -f "$D/protocol.md" ]; then
     "$WHISPER_PY" "$TOPDF" "$D/protocol.md" "$D/protocol.pdf" && open "$D"
   fi
 }
 
 do_pdf() {
-  local D; D="$(pick_dir "${1:-}")"
-  [ -f "$D/protocol.md" ] || { echo "нет $D/protocol.md — сначала podslushka protocol"; exit 1; }
+  pick_dir "${1:-}" || return 1
+  local D="$DIR"
+  [ -f "$D/protocol.md" ] || { echo "нет $D/protocol.md — сначала podslushka protocol"; return 1; }
   "$WHISPER_PY" "$TOPDF" "$D/protocol.md" "$D/protocol.pdf" && open "$D"
 }
 
