@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 # Картотека записей в браузере. Слушает только 127.0.0.1.
 HOME_DIR="${PODSLUSHKA_HOME:-$HOME/.podslushka}"
 PORT="${PODSLUSHKA_PORT:-8477}"

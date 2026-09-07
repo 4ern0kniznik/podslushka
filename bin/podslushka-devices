@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 # Список аудиоустройств. ffmpeg после вывода списка всегда завершается ошибкой —
 # это его штатное поведение, её отбрасываем.
 ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 \
