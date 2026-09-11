@@ -111,7 +111,10 @@ function toast(t){ const el=$('#toast'); el.textContent=t; el.classList.add('on'
   clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('on'),2200); }
 
 async function api(url, opts){
-  const r = await fetch(url, opts);
+  const o = Object.assign({}, opts);
+  if (o.method && o.method !== 'GET')
+    o.headers = Object.assign({'Content-Type': 'application/json'}, o.headers || {});
+  const r = await fetch(url, o);
   const j = await r.json().catch(()=>({}));
   if (j.error) toast(j.error);
   return j;

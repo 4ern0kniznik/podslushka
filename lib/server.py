@@ -201,6 +201,28 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def csrf_ok(self) -> bool:
+        """Отсекает запросы, которые инициировала чужая страница в браузере.
+
+        На межсайтовый запрос браузер обязательно шлёт Origin и Sec-Fetch-Site.
+        curl и собственные скрипты не шлют ни того, ни другого — их не трогаем,
+        CSRF через них невозможен. Плюс требуем application/json: такой
+        Content-Type браузер не поставит без preflight, а preflight с чужого
+        origin сюда не пройдёт.
+        """
+        site = self.headers.get("Sec-Fetch-Site")
+        if site and site not in ("same-origin", "none"):
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            host = urllib.parse.urlparse(origin).hostname
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                return False
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return False
+        return True
+
     def safe_call(self, call_id: str):
         d = (BASE / call_id).resolve()
         if d.parent != BASE.resolve() or not d.is_dir():
@@ -332,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST --
     def do_POST(self):
+        if not self.csrf_ok():
+            return self.send_json({"error": "запрос отклонён: чужой источник"}, 403)
         url = urllib.parse.urlparse(self.path)
         parts = url.path.strip("/").split("/")
         try:
