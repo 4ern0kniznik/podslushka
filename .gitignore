@@ -5,3 +5,29 @@ __pycache__/
 # Внутренняя контора компании — не для публичного репозитория
 Контора/
 .claude/
+
+# Служебное рабочей папки
+graphify-out/
+_архив
+
+# Записи и расшифровки звонков — никогда в git
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.aiff
+*.caf
+*.ogg
+*.flac
+*.opus
+*.srt
+*.vtt
+*.peaks
+транскрипт*/
+расшифровк*/
+записи/
+recordings/
+transcripts/
+transcript.*
+transcript*.txt
+protocol*.pdf
