@@ -81,6 +81,79 @@ enum CA {
         }
     }
 
+    static func u32(_ id: AudioObjectID, _ sel: AudioObjectPropertySelector,
+                    _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> UInt32? {
+        var a = addr(sel, scope)
+        var v: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectHasProperty(id, &a),
+              AudioObjectGetPropertyData(id, &a, 0, nil, &size, &v) == noErr else { return nil }
+        return v
+    }
+
+    static func ids(_ id: AudioObjectID, _ sel: AudioObjectPropertySelector,
+                    _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> [AudioObjectID] {
+        var a = addr(sel, scope)
+        var size: UInt32 = 0
+        guard AudioObjectHasProperty(id, &a),
+              AudioObjectGetPropertyDataSize(id, &a, 0, nil, &size) == noErr, size > 0 else { return [] }
+        let n = Int(size) / MemoryLayout<AudioObjectID>.size
+        var out = [AudioObjectID](repeating: 0, count: n)
+        guard AudioObjectGetPropertyData(id, &a, 0, nil, &size, &out) == noErr else { return [] }
+        return Array(out.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
+    }
+
+    static func find(uid target: String) -> AudioObjectID? {
+        allDevices().first { uid($0) == target }
+    }
+
+    static func isBluetooth(_ id: AudioObjectID) -> Bool {
+        let t = u32(id, kAudioDevicePropertyTransportType) ?? 0
+        return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    static func isBuiltIn(_ id: AudioObjectID) -> Bool {
+        u32(id, kAudioDevicePropertyTransportType) == kAudioDeviceTransportTypeBuiltIn
+    }
+
+    /// Динамики — встроенный выход, в гнездо которого не воткнуты наушники.
+    /// Только из динамиков голос собеседника долетает до микрофона сам; всё
+    /// остальное (AirPods, проводные наушники, монитор) запись не слышит.
+    static func isSpeakers(_ id: AudioObjectID) -> Bool {
+        guard isBuiltIn(id) else { return false }
+        let headphones: UInt32 = 0x6864706E   // 'hdpn'
+        return u32(id, kAudioDevicePropertyDataSource, kAudioObjectPropertyScopeOutput) != headphones
+    }
+
+    /// Поддевайсы агрегата: все, что в нём записаны, и те, что сейчас живы.
+    /// После переподключения AirPods запись остаётся, а живого устройства нет.
+    static func subUIDs(_ agg: AudioObjectID) -> (all: [String], active: [String]) {
+        var a = addr(kAudioAggregateDevicePropertyFullSubDeviceList)
+        var size = UInt32(MemoryLayout<CFArray?>.size)
+        var arr: CFArray? = nil
+        let st = withUnsafeMutablePointer(to: &arr) {
+            AudioObjectGetPropertyData(agg, &a, 0, nil, &size, $0)
+        }
+        let all = st == noErr ? ((arr as? [String]) ?? []) : []
+        let active = ids(agg, kAudioAggregateDevicePropertyActiveSubDeviceList).compactMap { uid($0) }
+        return (all, active)
+    }
+
+    /// Кто сейчас играет звук и на какие устройства: pid → выходы.
+    /// Список процессов CoreAudio отдаёт с macOS 14.2, на старых — пусто.
+    static func outputPlayers() -> [pid_t: [AudioObjectID]] {
+        guard #available(macOS 14.2, *) else { return [:] }
+        var res: [pid_t: [AudioObjectID]] = [:]
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        for p in ids(sys, kAudioHardwarePropertyProcessObjectList) {
+            guard (u32(p, kAudioProcessPropertyIsRunningOutput) ?? 0) != 0,
+                  let raw = u32(p, kAudioProcessPropertyPID) else { continue }
+            let devs = ids(p, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeOutput)
+            if !devs.isEmpty { res[pid_t(bitPattern: raw), default: []] += devs }
+        }
+        return res
+    }
+
     /// Собрать агрегатное (stacked = устройство с многими выходами) устройство.
     /// Строковые ключи — из AudioHardware.h, чтобы не зависеть от импорта макросов.
     static func createAggregate(name: String, uid deviceUID: String,
@@ -147,7 +220,13 @@ final class App: NSObject, NSApplicationDelegate {
     var ticker: Timer?
     var menuOpen = false
 
-    let defaults = UserDefaults.standard
+    // Из пакета настройки читаются как обычно. Голый бинарник (сборка для
+    // проверки, --audio-report из терминала) читает те же настройки приложения.
+    let defaults = Bundle.main.bundleIdentifier == nil
+        ? (UserDefaults(suiteName: "local.podslushka.app") ?? .standard)
+        : UserDefaults.standard
+    var starting = false             // идут проверки перед стартом
+    let noCallFile = URL(fileURLWithPath: "/tmp/podslushka/nocall")
     var micName: String {
         get { defaults.string(forKey: "mic") ?? "Микрофон MacBook Pro" }
         set { defaults.set(newValue, forKey: "mic") }
@@ -201,6 +280,10 @@ final class App: NSObject, NSApplicationDelegate {
             } else {
                 print("не нашёл, куда возвращать — выбери выход вручную")
             }
+            didWork = true
+        }
+        if args.contains("--audio-report") {
+            print(audioReport())
             didWork = true
         }
         if args.contains("--make-devices") {
@@ -352,8 +435,17 @@ final class App: NSObject, NSApplicationDelegate {
 
     func updatePanel() {
         guard let dot = panelDot, let label = panelLabel, let rec = panelButton else { return }
-        if recording, let t = startedAt {
+        if recording, let t = startedAt,
+           FileManager.default.fileExists(atPath: noCallFile.path) {
+            // Сторож callcheck положил флаг: звонка в записи нет.
+            dot.layer?.backgroundColor = NSColor.systemYellow.cgColor
+            label.stringValue = "Нет звонка"
+            label.toolTip = "Идёт \(clock(Date().timeIntervalSince(t))), но пишется только микрофон. Выбери в звонке динамик Podslushka Out."
+            rec.title = "Стоп"
+            rec.isEnabled = true
+        } else if recording, let t = startedAt {
             dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+            label.toolTip = nil
             label.stringValue = "Идёт " + clock(Date().timeIntervalSince(t))
             rec.title = "Стоп"
             rec.isEnabled = true
@@ -452,7 +544,10 @@ final class App: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let setup = NSMenuItem(title: "Создать аудиоустройства", action: #selector(makeDevicesFromMenu), keyEquivalent: "")
+        let broken = CA.find(name: "Podslushka In") != nil && routeProblem(expect: nil) != nil
+        let setup = NSMenuItem(title: broken ? "Пересобрать устройства (Podslushka Out неисправен)"
+                                             : "Создать аудиоустройства",
+                               action: #selector(makeDevicesFromMenu), keyEquivalent: "")
         setup.target = self
         menu.addItem(setup)
 
@@ -479,7 +574,7 @@ final class App: NSObject, NSApplicationDelegate {
         dock.state = inDock ? .on : .off
         menu.addItem(dock)
 
-        let sw = NSMenuItem(title: "Переключать звук самому", action: #selector(toggleAuto), keyEquivalent: "")
+        let sw = NSMenuItem(title: "Переключать звук самому (в наушниках — всегда)", action: #selector(toggleAuto), keyEquivalent: "")
         sw.target = self
         sw.state = autoSwitch ? .on : .off
         menu.addItem(sw)
@@ -532,7 +627,11 @@ final class App: NSObject, NSApplicationDelegate {
 
     // MARK: действия
 
-    @objc func toggle() { dbg("нажато: запись/стоп"); recording ? stop() : start() }
+    @objc func toggle() {
+        dbg("нажато: запись/стоп")
+        if starting { dbg("старт уже готовится, нажатие пропущено"); return }
+        recording ? stop() : start()
+    }
 
     /// Прежний выход запоминается на диске: если приложение закроют во время
     /// записи, вернуть звук сможет следующий запуск. Пока выбран составной
@@ -577,17 +676,157 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Что не так с Podslushka Out. nil — исправен. expect — выход, который
+    /// должен в нём стоять (обычно текущие наушники); nil — не сверять.
+    func routeProblem(expect: AudioObjectID?) -> String? {
+        guard let po = CA.find(name: "Podslushka Out") else {
+            return "Устройства Podslushka Out нет."
+        }
+        let subs = CA.subUIDs(po)
+        let lost = subs.all.filter { !subs.active.contains($0) }
+        if !lost.isEmpty {
+            let names = lost.map { u in CA.find(uid: u).map(CA.name) ?? u }
+            return "В Podslushka Out отвалилось: \(names.joined(separator: ", ")). "
+                + "Так бывает, когда AirPods переподключались."
+        }
+        if let bh = CA.find(name: "BlackHole 2ch"), let bhUID = CA.uid(bh),
+           !subs.active.contains(bhUID) {
+            return "В Podslushka Out нет BlackHole 2ch."
+        }
+        if let want = expect, let wantUID = CA.uid(want), !subs.active.contains(wantUID) {
+            let inside = subs.active.compactMap { CA.find(uid: $0) }
+                .map(CA.name).filter { $0 != "BlackHole 2ch" }
+            return "Podslushka Out собран на «\(inside.joined(separator: ", "))», "
+                + "а звук сейчас идёт в «\(CA.name(want))»."
+        }
+        return nil
+    }
+
+    /// Приложения, которые играют звук мимо Podslushka Out: ни на него, ни
+    /// на BlackHole. Чаще всего это звонок с явно выбранными AirPods.
+    func bypassers() -> [String] {
+        let ok = Set([CA.find(name: "Podslushka Out"), CA.find(name: "BlackHole 2ch")].compactMap { $0 })
+        let me = ProcessInfo.processInfo.processIdentifier
+        var out: [String] = []
+        for (pid, devs) in CA.outputPlayers() where pid != me {
+            if devs.contains(where: ok.contains) { continue }
+            let app = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "процесс \(pid)"
+            let where_ = Array(Set(devs.map(CA.name))).sorted().joined(separator: ", ")
+            out.append("\(app) → \(where_)")
+        }
+        return out.sorted()
+    }
+
+    func ask(_ title: String, _ text: String, _ buttons: [String]) -> Int {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        for b in buttons { a.addButton(withTitle: b) }
+        return a.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+    }
+
+    /// Микрофон AirPods переводит их в режим гарнитуры: звук в ушах хуже, и
+    /// запись тоже. Возвращает true, если микрофон сменили и In надо пересобрать.
+    func micHint() -> Bool {
+        guard !defaults.bool(forKey: "micHintOff"),
+              let mic = CA.find(name: micName), CA.isBluetooth(mic),
+              let builtIn = CA.inputs().first(where: CA.isBuiltIn) else { return false }
+        let other = CA.name(builtIn)
+        switch ask("Микрофон — \(micName)",
+                   "В наушниках лучше писать с «\(other)»: микрофон AirPods включает режим "
+                   + "гарнитуры, и звук хуже и в ушах, и в записи. В приложении звонка тоже "
+                   + "выберите «\(other)».",
+                   ["Взять «\(other)»", "Оставить", "Не спрашивать"]) {
+        case 0:
+            micName = other
+            dbg("микрофон сменён на \(other) по подсказке")
+            return true
+        case 2:
+            defaults.set(true, forKey: "micHintOff")
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// Порядок: подсказка про микрофон → исправность Podslushka Out → выход на
+    /// Podslushka Out → через 1,5 с проверка, не играет ли звонок мимо → старт.
+    /// В наушниках выход переключается всегда: из динамиков голос собеседника
+    /// ловит микрофон, из наушников — никто, кроме BlackHole.
     func start() {
         guard CA.find(name: "Podslushka In") != nil else {
             return alert("Нет устройства Podslushka In",
                          "Нажми «Создать аудиоустройства» — оно соберёт Podslushka In и Podslushka Out.")
         }
-        if autoSwitch, let target = CA.find(name: "Podslushka Out") {
-            rememberOutput(CA.defaultOutput)
-            CA.defaultOutput = target
+        let current = CA.defaultOutput
+        let onPodOut = CA.name(current) == "Podslushka Out"
+        let headphones = !onPodOut && !CA.isSpeakers(current)
+        let useRoute = onPodOut || headphones || autoSwitch
+        dbg("старт: выход \(CA.name(current)), наушники \(headphones), autoSwitch \(autoSwitch)")
+
+        var rebuild = micHint()
+        if useRoute {
+            let expect = onPodOut ? CA.find(name: outName) : current
+            if let problem = routeProblem(expect: expect) {
+                dbg("маршрут: \(problem)")
+                let target = onPodOut ? outName : CA.name(current)
+                switch ask("Podslushka Out надо пересобрать",
+                           problem + "\n\nБез этого звонок в запись не попадёт. Пересборка "
+                           + "соберёт Podslushka In и Out заново на «\(target)».",
+                           ["Пересобрать", "Писать как есть", "Отмена"]) {
+                case 0:
+                    outName = target
+                    rebuild = true
+                case 1:
+                    break
+                default:
+                    return
+                }
+            }
         }
+        if rebuild {
+            let back = onPodOut ? CA.find(name: outName) : current
+            guard makeDevices(silent: false, quietOK: true) else { return }
+            if let back, onPodOut { rememberOutput(back) }
+        }
+
+        let now = CA.defaultOutput
+        if useRoute, CA.name(now) != "Podslushka Out", let target = CA.find(name: "Podslushka Out") {
+            if savedOutput == nil { rememberOutput(now) }
+            CA.defaultOutput = target
+            dbg("выход переключён: \(CA.name(now)) → Podslushka Out")
+        }
+        guard useRoute else { return launch() }
+
+        // Приложения подхватывают новый системный выход не мгновенно.
+        starting = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            let by = self.bypassers()
+            if !by.isEmpty {
+                dbg("мимо Podslushka Out: \(by.joined(separator: "; "))")
+                let go = self.ask("Звонок играет мимо Podslushka Out",
+                                  by.joined(separator: "\n")
+                                  + "\n\nВыберите динамик Podslushka Out в Zoom/Teams/Телемосте "
+                                  + "(или «как в системе»). Иначе в запись попадёт только ваш голос.",
+                                  ["Всё равно писать", "Отмена"])
+                if go != 0 {
+                    self.starting = false
+                    self.restoreOutput()
+                    self.rebuildMenu()
+                    return
+                }
+            }
+            self.launch()
+        }
+    }
+
+    func launch() {
+        starting = true
         run(["start"]) { [weak self] ok in
             guard let self else { return }
+            self.starting = false
             if ok {
                 self.recording = true
                 self.startedAt = Date()
@@ -598,6 +837,35 @@ final class App: NSObject, NSApplicationDelegate {
             self.rebuildMenu()
             self.redrawIcon()
         }
+    }
+
+    /// Состояние маршрута для `podslushka doctor`: строки «ключ<TAB>значение».
+    func audioReport() -> String {
+        // Длинная строка-метка лежит в бинарнике открытым текстом: по ней
+        // doctor отличает новое приложение от старого, не запуская его.
+        var r: [String] = ["report\tpodslushka-audio-report-v1"]
+        let cur = CA.defaultOutput
+        let kind = CA.name(cur) == "Podslushka Out" ? "podslushka-out"
+                 : (CA.isSpeakers(cur) ? "speakers" : "headphones")
+        r.append("output\t\(CA.name(cur))\t\(kind)")
+        r.append("autoswitch\t\(autoSwitch ? 1 : 0)")
+        r.append("setting_out\t\(outName)")
+        let micKind = CA.find(name: micName).map { CA.isBluetooth($0) ? "bluetooth" : (CA.isBuiltIn($0) ? "builtin" : "other") } ?? "missing"
+        r.append("setting_mic\t\(micName)\t\(micKind)")
+        if let po = CA.find(name: "Podslushka Out") {
+            let names = CA.subUIDs(po).active.compactMap { CA.find(uid: $0) }.map(CA.name)
+            r.append("podout_subs\t\(names.joined(separator: ", "))")
+        }
+        // Сверяем с тем, на что Подслушка переключит: наушники сейчас — они,
+        // иначе выбранный в меню выход.
+        let expect = kind == "headphones" ? cur : CA.find(name: outName)
+        if let p = routeProblem(expect: expect) {
+            r.append("podout\tproblem\t\(p)")
+        } else {
+            r.append("podout\tok")
+        }
+        for b in bypassers() { r.append("bypass\t\(b)") }
+        return r.joined(separator: "\n")
     }
 
     func stop() {
@@ -639,7 +907,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    func makeDevices(silent: Bool) -> Bool {
+    func makeDevices(silent: Bool, quietOK: Bool = false) -> Bool {
         func say(_ title: String, _ body: String) {
             if silent {
                 print(title)
@@ -677,7 +945,9 @@ final class App: NSObject, NSApplicationDelegate {
             problems.append("Podslushka Out: \(e)")
         }
 
-        if problems.isEmpty {
+        if problems.isEmpty && quietOK {
+            dbg("устройства пересобраны: \(micName) / \(outName)")
+        } else if problems.isEmpty {
             say("Устройства готовы",
                 "Podslushka In — \(micName) + BlackHole.\n"
                 + "Podslushka Out — \(outName) + BlackHole.\n\n"
@@ -702,6 +972,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func alert(_ title: String, _ text: String) {
+        NSApp.activate(ignoringOtherApps: true)
         let a = NSAlert()
         a.messageText = title
         a.informativeText = text

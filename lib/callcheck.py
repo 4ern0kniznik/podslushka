@@ -10,8 +10,11 @@ Podslushka In собран как [микрофон, BlackHole 2ch], поэто�
 
 Файл читается сырым: пока ffmpeg пишет, размер блока данных в заголовке ещё
 не проставлен, поэтому граница данных берётся по размеру файла.
-live молчит, если звук звонка есть, и один раз предупреждает, если его нет
-дольше WARN_AFTER секунд. summary дописывает в meta.json call_audio_seconds
+live молчит, если звук звонка есть, и один раз предупреждает, если его нет:
+через EARLY_WARN секунд, если в микрофоне уже звучит голос (разговор идёт,
+а собеседников не слышно), и через WARN_AFTER секунд в любом случае. Пока
+предупреждение в силе, рядом с pid-файлом лежит флаг nocall — по нему панель
+показывает «Нет звонка». summary дописывает в meta.json call_audio_seconds
 и выходит с кодом 3, если звука звонка не было совсем.
 """
 import array
@@ -24,8 +27,10 @@ import time
 from pathlib import Path
 
 THRESHOLD = 10          # из 32767, это около -70 дБ
-WARN_AFTER = 60         # секунд без звука звонка до предупреждения
-POLL = 10               # как часто смотреть, секунд
+MIC_VOICE = 600         # голос в микрофоне, около -35 дБ: шум комнаты тише
+EARLY_WARN = 15         # секунд тишины звонка при голосе в микрофоне
+WARN_AFTER = 60         # секунд без звука звонка до предупреждения в любом случае
+POLL = 5                # как часто смотреть, секунд: предупреждение на 15–20 с
 TAIL = 5                # сколько последних секунд слушать за раз
 
 
@@ -52,22 +57,32 @@ def header(path: Path):
 
 
 def call_peak(block: bytes, ch: int) -> int:
-    """Наибольшая амплитуда в двух последних каналах блока."""
+    """Наибольшая амплитуда в двух последних каналах блока — звонок."""
+    return peak_of(block, ch, (ch - 2, ch - 1))
+
+
+def mic_peak(block: bytes, ch: int) -> int:
+    """Наибольшая амплитуда в каналах микрофона — все, кроме двух последних."""
+    return peak_of(block, ch, range(ch - 2))
+
+
+def peak_of(block: bytes, ch: int, chans) -> int:
     a = array.array("h")
     a.frombytes(block[:len(block) - len(block) % (2 * ch)])
     if sys.byteorder != "little":
         a.byteswap()
     peak = 0
-    for c in (ch - 2, ch - 1):
+    for c in chans:
         part = a[c::ch]
         if part:
             peak = max(peak, max(part), -min(part))
     return peak
 
 
-def notify(text: str) -> None:
+def notify(text: str, sound: bool = False) -> None:
+    tail = ' sound name "Funk"' if sound else ""
     subprocess.run(["osascript", "-e",
-                    f'display notification "{text}" with title "Подслушка"'],
+                    f'display notification "{text}" with title "Подслушка"{tail}'],
                    capture_output=True)
 
 
@@ -81,6 +96,8 @@ def alive(pid_file: Path) -> bool:
 
 def live(wav: Path, pid_file: Path) -> int:
     started = time.time()
+    flag = pid_file.parent / "nocall"
+    flag.unlink(missing_ok=True)
     hdr = None
     while hdr is None:
         if not alive(pid_file) or time.time() - started > 30:
@@ -93,6 +110,7 @@ def live(wav: Path, pid_file: Path) -> int:
         return 0  # не агрегатное устройство, звонку взяться неоткуда
     frame = 2 * ch
     warned = False
+    voice = False
     while alive(pid_file):
         time.sleep(POLL)
         size = wav.stat().st_size
@@ -103,13 +121,19 @@ def live(wav: Path, pid_file: Path) -> int:
             block = f.read(size - start)
         if call_peak(block, ch) > THRESHOLD:
             if warned:
+                flag.unlink(missing_ok=True)
                 notify("Звук звонка пошёл в запись")
             return 0
-        if not warned and time.time() - started >= WARN_AFTER:
+        voice = voice or mic_peak(block, ch) > MIC_VOICE
+        waited = time.time() - started
+        if not warned and (waited >= WARN_AFTER or (voice and waited >= EARLY_WARN)):
             notify("Звука звонка нет, пишется только микрофон. "
-                   "Выбери в звонке динамик Podslushka Out")
-            print("звука звонка нет дольше минуты", flush=True)
+                   "Выбери в звонке динамик Podslushka Out", sound=True)
+            flag.touch()
+            print(f"звука звонка нет {int(waited)} с"
+                  f"{', голос в микрофоне есть' if voice else ''}", flush=True)
             warned = True
+    flag.unlink(missing_ok=True)
     return 0
 
 
