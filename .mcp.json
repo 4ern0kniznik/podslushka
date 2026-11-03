@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ispolnitel": {
+      "command": "python3",
+      "args": [
+        "/Users/yaitskii/Claude/Settings/agents-setup/ispolnitel/server.py"
+      ],
+      "env": {
+        "ISPOLNITEL_BASE_URL": "http://localhost:11434/v1",
+        "ISPOLNITEL_TIMEOUT": "180",
+        "ISPOLNITEL_MAX_TOKENS": "2000"
+      }
+    }
+  }
+}
