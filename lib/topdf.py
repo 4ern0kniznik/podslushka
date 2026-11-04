@@ -4,7 +4,8 @@
   python3 topdf.py protocol.md [out.pdf]
 
 Разбирает подмножество markdown, которое мы сами и порождаем: заголовки,
-списки, таблицы, выделение, цитаты, разделители. Верстает через безголовый
+списки, таблицы, выделение, цитаты, разделители, картинки отдельной строкой
+(кадры слайдов, путь от папки protocol.md). Верстает через безголовый
 Chrome; если его нет — через встроенный в macOS cupsfilter.
 """
 import html
@@ -53,6 +54,8 @@ th { background: #f7f5f0; font-weight: 600; }
 tr { page-break-inside: avoid; }
 .meta { color: #6b6960; font-size: 9.5pt; margin: 0 0 7mm;
         padding-bottom: 3mm; border-bottom: 1.2pt solid #16150f; }
+figure { margin: 1mm 0 3mm; page-break-inside: avoid; }
+figure img { width: 100%; border: 0.6pt solid #d8d5cc; }
 .foot { margin-top: 10mm; padding-top: 3mm; border-top: 0.6pt solid #d8d5cc;
         color: #8b8880; font-size: 8.5pt; }
 """
@@ -66,7 +69,7 @@ def inline(t: str) -> str:
     return t
 
 
-def md_to_html(md: str) -> str:
+def md_to_html(md: str, base: Path | None = None) -> str:
     out, lines, i = [], md.splitlines(), 0
     list_tag = None
 
@@ -97,6 +100,19 @@ def md_to_html(md: str) -> str:
 
         if not line.strip():
             close_list()
+            i += 1
+            continue
+
+        if line.startswith("<!--"):  # служебные пометки
+            i += 1
+            continue
+
+        m = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)$", line.strip())
+        if m:
+            close_list()
+            src = ((base or Path.cwd()) / m.group(2)).resolve()
+            if src.is_file():
+                out.append(f'<figure><img src="{src.as_uri()}" alt="{html.escape(m.group(1))}"></figure>')
             i += 1
             continue
 
@@ -147,7 +163,7 @@ def md_to_html(md: str) -> str:
         i += 1
         while i < len(lines):
             nxt = lines[i].rstrip()
-            if (not nxt.strip() or nxt.startswith(("#", ">", "|"))
+            if (not nxt.strip() or nxt.startswith(("#", ">", "|", "![", "<!--"))
                     or re.match(r"^\s*([-*]\s+|\d+[.)]\s+)", nxt)
                     or re.match(r"^([-*_])\1{2,}$", nxt.strip())):
                 break
@@ -199,7 +215,7 @@ def main() -> int:
     md = src.read_text(encoding="utf-8")
     title = next((l.lstrip("# ").strip() for l in md.splitlines()
                   if l.startswith("# ")), src.stem)
-    body = md_to_html(md)
+    body = md_to_html(md, src.resolve().parent)
     page = (f"<!doctype html><html lang=ru><head><meta charset=utf-8>"
             f"<title>{html.escape(title)}</title><style>{CSS}</style></head>"
             f"<body>{body}"

@@ -3,7 +3,8 @@
 
   ~/.podslushka/venv/bin/python transcribe.py audio.wav [ещё файлы...]
 
-Рядом с аудио кладёт transcript.txt, transcript.srt, transcript.md.
+Рядом с аудио кладёт transcript.txt, transcript.srt, transcript.md. Если при
+стопе сняты дорожки (tracks.json), реплики подписаны «Они:» и «Я:».
 
 Движок: на Apple Silicon с пакетом mlx-whisper — MLX на видеоядре, иначе
 faster-whisper на процессоре. Замер 04.11.2026 (tests/asr_bench): large-v3-turbo
@@ -55,6 +56,16 @@ GHOSTS = re.compile(
     r"^(продолжение следует|субтитры (сделал|создавал|подготовил)|редактор субтитров|"
     r"корректор|спасибо за просмотр|подписывайтесь на канал|thanks for watching)",
     re.I)
+
+
+def load_tracks(folder: Path):
+    """Огибающая дорожек «Они / Я» из tracks.py, если её сняли при стопе."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        from tracks import Tracks
+    except Exception:
+        return None
+    return Tracks.load(folder)
 
 
 def is_ghost(text: str) -> bool:
@@ -159,14 +170,17 @@ def run(audio: Path, model) -> None:
           f"длительность: {info.duration/60:.1f} мин", flush=True)
 
     out = audio.parent
+    tracks = load_tracks(out)
     lines, srt, md = [], [], []
     for i, seg in enumerate(segments, 1):
         text = seg.text.strip()
         if not text or is_ghost(text):
             continue
-        lines.append(text)
-        srt.append(f"{i}\n{ts(seg.start, True)} --> {ts(seg.end, True)}\n{text}\n")
-        md.append(f"- `{ts(seg.start)[:8]}` {text}")
+        who = tracks.who(seg.start, seg.end) if tracks else None
+        lines.append(f"{who}: {text}" if who else text)
+        srt.append(f"{i}\n{ts(seg.start, True)} --> {ts(seg.end, True)}\n"
+                   f"{who + ': ' if who else ''}{text}\n")
+        md.append(f"- `{ts(seg.start)[:8]}` {'**' + who + ':** ' if who else ''}{text}")
         if i % 25 == 0:
             print(f"  … {ts(seg.end)[:8]}", flush=True)
 
