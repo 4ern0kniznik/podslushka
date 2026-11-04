@@ -41,7 +41,9 @@ NEW = 6          # клеток, сменившихся с прошлого ка
 LIVE = 3          # клетка сменилась 3 раза за 6 тиков (4,5 с) — там видео или курсор
 MEMORY = 6
 MIN_STATIC = 0.3  # меньше 30% экрана неподвижно — это видео, кадров не надо
-GAP = 3.0         # с, не чаще одного кадра
+GAP = 5.0         # с, не чаще одного кадра (слайд, что стоит дольше, всё равно попадёт)
+# Правый верхний угол — баннеры уведомлений macOS: 4 клетки × 2 ряда в расчёт не идут.
+BANNER = {gy * GW + gx for gy in range(2) for gx in range(GW - 4, GW)}
 MAX_FRAMES = int(os.environ.get("PODSLUSHKA_FRAMES_MAX", "300"))
 WIDTH = 1920    # кадр ужимается до этой ширины
 BEGIN, END = "<!-- кадры: начало -->", "<!-- кадры: конец -->"
@@ -59,7 +61,7 @@ def changed(a: bytes, b: bytes) -> list[bool]:
             for y in range(gy * ch, (gy + 1) * ch):
                 r = y * W + gx * cw
                 n += sum(1 for x, z in zip(a[r:r + cw], b[r:r + cw]) if abs(x - z) > PIX)
-            out.append(n > need)
+            out.append(n > need and gy * GW + gx not in BANNER)
     return out
 
 
