@@ -1,6 +1,6 @@
 #!/bin/bash
 # Подслушка — запись звонка и протокол
-# start | stop | status | toggle | doctor | setup | fix-audio | protocol | pdf
+# start | stop | status | toggle | doctor | setup | fix-audio | protocol | pdf | after | autostart
 # Пишет микрофон и звук системы через агрегатное устройство "Podslushka In",
 # после стопа сразу расшифровывает локальным faster-whisper.
 
@@ -23,12 +23,19 @@ TRANSCRIBE="$HOME_DIR/lib/transcribe.py"
 PROTOCOL="$HOME_DIR/lib/protocol.py"
 TOPDF="$HOME_DIR/lib/topdf.py"
 MODEL2="${PODSLUSHKA_MODEL2:-large-v3}"
-SECOND_PASS="${PODSLUSHKA_SECOND_PASS:-1}"
+# Второй проход точной моделью: auto — только если первый шёл на процессоре
+# (faster-whisper). На MLX первый проход уже large-v3-turbo, точный и быстрый.
+SECOND_PASS="${PODSLUSHKA_SECOND_PASS:-auto}"
 PEAKS="$HOME_DIR/lib/make_peaks.py"
 CALLCHECK="$HOME_DIR/lib/callcheck.py"
 NOCALL_FILE="$STATE_DIR/nocall"
 APP_BIN="${PODSLUSHKA_APP:-$HOME/Applications/Podslushka.app/Contents/MacOS/Podslushka}"
 KEEP_WAV="${PODSLUSHKA_KEEP_WAV:-0}"
+# Автоцепочка после звонка: точная расшифровка → протокол на локальной
+# модели → копия во «вторую память» → уведомление. Выключить: AUTO_PROTOCOL=0.
+AUTO_PROTOCOL="${PODSLUSHKA_AUTO_PROTOCOL:-1}"
+LLM="${PODSLUSHKA_LLM:-qwen3:30b-a3b}"
+INBOX="${PODSLUSHKA_INBOX:-$HOME/Claude/Память/Входящие}"
 
 mkdir -p "$STATE_DIR" "$BASE_DIR"
 
@@ -173,16 +180,11 @@ do_stop() {
 
   if [ "$KEEP_WAV" != "1" ] && [ "$AUDIO" != "$WAV" ]; then rm -f "$WAV"; fi
 
-  # Второй проход точной моделью идёт в фоне: черновик уже есть, а точный текст
-  # подъезжает позже и перезаписывает transcript.*. Черновик остаётся рядом.
-  if [ "$SECOND_PASS" = "1" ] && [ -n "$MODEL2" ] && [ "$MODEL2" != "${PODSLUSHKA_MODEL:-medium}" ]; then
-    cp -f "$OUT_DIR/transcript.txt" "$OUT_DIR/transcript-draft.txt" 2>/dev/null
-    nohup bash -c "
-      PODSLUSHKA_MODEL='$MODEL2' '$WHISPER_PY' '$TRANSCRIBE' '$AUDIO' \
-        && osascript -e 'display notification \"Точная расшифровка готова\" with title \"Подслушка\"' \
-        || osascript -e 'display notification \"Второй проход не удался\" with title \"Подслушка\"'
-    " > "$OUT_DIR/second-pass.log" 2>&1 &
-    echo "  второй проход ($MODEL2) идёт в фоне, журнал: $OUT_DIR/second-pass.log"
+  # Дальше всё идёт в фоне одной цепочкой: второй проход точной моделью,
+  # потом протокол по точному тексту. Черновик остаётся рядом.
+  if [ "$SECOND_PASS" != "0" ] || [ "$AUTO_PROTOCOL" = "1" ]; then
+    nohup "$0" after "$OUT_DIR" "$AUDIO" > "$OUT_DIR/after.log" 2>&1 &
+    echo "  дальше в фоне: протокол (и точная расшифровка, если нужна), журнал: $OUT_DIR/after.log"
   fi
 
   echo "Готово: $OUT_DIR"
@@ -194,6 +196,100 @@ do_stop() {
     notify "" "Транскрипт готов"
   fi
   open "$OUT_DIR"
+}
+
+# Цепочка после звонка. $1 — папка звонка, $2 — аудио (по умолчанию audio.m4a).
+# Каждый шаг пишет в after.log; упавший шаг не валит остальные: без точной
+# расшифровки протокол строится по черновику.
+do_after() {
+  local D="${1%/}" A="${2:-}" t0 name copy
+  [ -d "$D" ] || { echo "нет папки: $D"; return 1; }
+  [ -n "$A" ] || A="$D/audio.m4a"
+  [ -f "$A" ] || A="$D/audio.wav"
+  t0=$(date +%s)
+  echo "=== цепочка $(date '+%d.%m %H:%M:%S'): $D"
+
+  local second="$SECOND_PASS"
+  if [ "$second" = "auto" ]; then
+    second=1
+    grep -q '"engine": "mlx"' "$D/meta.json" 2>/dev/null && second=0
+  fi
+  if [ "$second" = "1" ] && [ -n "$MODEL2" ] && [ "$MODEL2" != "${PODSLUSHKA_MODEL:-large-v3-turbo}" ] && [ -f "$A" ]; then
+    cp -f "$D/transcript.txt" "$D/transcript-draft.txt" 2>/dev/null
+    echo "--- точная расшифровка ($MODEL2)"
+    if PODSLUSHKA_MODEL="$MODEL2" "$WHISPER_PY" "$TRANSCRIBE" "$A"; then
+      [ "$AUTO_PROTOCOL" = "1" ] || notify "" "Точная расшифровка готова"
+    else
+      echo "второй проход не удался, протокол — по черновику"
+      notify "" "Второй проход не удался"
+    fi
+  fi
+
+  [ "$AUTO_PROTOCOL" = "1" ] || return 0
+  echo "--- протокол ($LLM)"
+  rm -f "$D/protocol.md"
+  "$WHISPER_PY" "$PROTOCOL" "$D" --engine ollama --model "$LLM"
+  if [ ! -s "$D/protocol.md" ]; then
+    echo "протокола нет (короткий звонок или модель не ответила)"
+    notify "" "Протокол не собрался — см. after.log в папке звонка"
+    return 1
+  fi
+  "$WHISPER_PY" "$TOPDF" "$D/protocol.md" "$D/protocol.pdf" >/dev/null 2>&1 || echo "PDF не собрался"
+
+  # Имя по времени начала звонка, из имени папки ГГГГ-ММ-ДД_ЧЧ-ММ-СС.
+  name="$(basename "$D")"
+  if [ -d "$INBOX" ]; then
+    copy="$INBOX/${name:0:10}_звонок_${name:11:5}.md"
+    [ -e "$copy" ] && copy="$INBOX/${name:0:10}_звонок_${name:11:8}.md"
+    { cat "$D/protocol.md"; printf '\n---\nИсточник: %s · расшифровка %s · протокол %s\n' \
+        "$D" "$(sed -n 's/.*"model": "\(.*\)".*/\1/p' "$D/meta.json" 2>/dev/null | head -1)" "$LLM"; } > "$copy"
+    echo "копия: $copy"
+    notify "" "Протокол готов: $(basename "$copy")"
+  else
+    echo "нет папки $INBOX — протокол только в $D"
+    notify "" "Протокол готов (папки Входящие нет)"
+  fi
+  echo "=== готово за $(( $(date +%s) - t0 )) с"
+}
+
+# Автозапуск при входе: LaunchAgent открывает приложение через LaunchServices,
+# как двойной клик в Finder, — разрешения на микрофон те же. Перезапуском не
+# занимается: закрыл панель — до следующего входа её нет.
+AGENT_LABEL="com.podslushka.autostart"
+AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+do_autostart() {
+  local app="${APP_BIN%/Contents/MacOS/*}"
+  case "${1:-status}" in
+    on)
+      [ -d "$app" ] || { echo "нет приложения: $app"; return 1; }
+      mkdir -p "$(dirname "$AGENT_PLIST")"
+      cat > "$AGENT_PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$AGENT_LABEL</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/open</string><string>-g</string><string>$app</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+PL
+      plutil -lint "$AGENT_PLIST" >/dev/null || { echo "plist не прошёл проверку"; return 1; }
+      launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null
+      launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" \
+        && echo "автозапуск включён: $app откроется при входе" ;;
+    off)
+      launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null
+      rm -f "$AGENT_PLIST"; echo "автозапуск выключен" ;;
+    *)
+      if [ -f "$AGENT_PLIST" ] && launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
+        echo "автозапуск включён ($AGENT_PLIST)"
+      else
+        echo "автозапуск выключен"; return 1
+      fi ;;
+  esac
 }
 
 # Выбранная папка кладётся в DIR, а не печатается: подстановка $(...) уходит
@@ -243,16 +339,25 @@ do_doctor() {
   check "устройство ${DEVICE_NAME}" "test -n \"\$(find_device_index)\""
   check "папка записей"          "test -d '$BASE_DIR' || mkdir -p '$BASE_DIR'"
   echo "  ---- для протоколов, не обязательно ----"
+  if "$WHISPER_PY" -c 'import mlx_whisper' >/dev/null 2>&1; then
+    echo "  есть   mlx-whisper: расшифровка на видеоядре, второй проход не нужен"
+  else
+    echo "  нет    mlx-whisper — расшифровка на процессоре: $HOME_DIR/venv/bin/pip install mlx-whisper"
+  fi
   if [ -d "$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-$MODEL2" ]; then
     echo "  есть   точная модель $MODEL2"
   else
     echo "  нет    точной модели $MODEL2 — скачается при первом втором проходе"
   fi
-  if command -v ollama >/dev/null; then
-    echo "  есть   ollama, протокол соберётся офлайн"
+  if curl -s -m 3 http://127.0.0.1:11434/api/tags 2>/dev/null | grep -qF "\"$LLM\""; then
+    echo "  есть   ollama с $LLM, протокол после звонка соберётся сам"
+  elif command -v ollama >/dev/null; then
+    echo "  нет    модели $LLM в ollama (или сервер не запущен) — ollama pull $LLM"
   else
     echo "  нет    ollama — протокол выйдет заготовкой для внешней модели"
   fi
+  if do_autostart status >/dev/null; then echo "  есть   автозапуск при входе"
+  else echo "  нет    автозапуска при входе — podslushka autostart on"; fi
   doctor_route || ok=1
   echo
   if [ "$ok" = 0 ]; then echo "Всё на месте."; else echo "Чего-то не хватает — см. строки НЕТ выше"; fi
@@ -368,6 +473,8 @@ case "${1:-toggle}" in
   fix-audio) do_fix_audio; exit $? ;;
   protocol) shift; do_protocol "${1:-}"; exit $? ;;
   pdf) shift; do_pdf "${1:-}"; exit $? ;;
+  after) shift; do_after "${1:-}" "${2:-}"; exit $? ;;
+  autostart) shift; do_autostart "${1:-status}"; exit $? ;;
   setup) do_setup ;;
   start) do_start ;;
   stop) do_stop ;;
@@ -381,5 +488,5 @@ case "${1:-toggle}" in
     fi
     ;;
   toggle) is_running && do_stop || do_start ;;
-  *) echo "podslushka [toggle|start|stop|status|doctor|setup|fix-audio|protocol|pdf]"; exit 2 ;;
+  *) echo "podslushka [toggle|start|stop|status|doctor|setup|fix-audio|protocol|pdf|after|autostart on|off]"; exit 2 ;;
 esac

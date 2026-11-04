@@ -11,6 +11,7 @@
            и расшифровкой. Отдаёшь её Claude, ответ кладёшь в protocol.md.
 
 Без указания движка берётся ollama, если он установлен, иначе prompt.
+Модель: --model, иначе PODSLUSHKA_LLM, иначе qwen3:30b-a3b, если она есть.
 """
 import json
 import os
@@ -18,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -60,7 +62,26 @@ TIMEOUT = 60 * 20     # локальная модель на длинном зв
 """
 
 
+OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+if not OLLAMA.startswith("http"):
+    OLLAMA = "http://" + OLLAMA
+DEFAULT_LLM = "qwen3:30b-a3b"
+
+
+def _api(path: str, body: dict | None = None, timeout: float = 20):
+    # Только локальный Ollama: расшифровка звонка не уходит с мака.
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(OLLAMA + path, data=data,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
 def ollama_models() -> list[str]:
+    try:
+        return [m["name"] for m in _api("/api/tags").get("models", [])]
+    except Exception:
+        pass
     if not shutil.which("ollama"):
         return []
     try:
@@ -78,16 +99,21 @@ def ollama_models() -> list[str]:
 
 
 def ask(model: str, prompt: str) -> str | None:
+    # Через HTTP, а не `ollama run`: у думающих моделей (qwen3, deepseek-r1)
+    # консоль подмешивает рассуждения в ответ. qwen3:30b-a3b думает всегда,
+    # think=false он не слушается и пишет рассуждения прямо в ответ, а при
+    # think=true Ollama кладёт их в отдельное поле. Поэтому think=true, а если
+    # модель всё же оставила «…</think>» в тексте, берётся то, что после.
     try:
-        r = subprocess.run(["ollama", "run", model], input=prompt,
-                           capture_output=True, text=True, timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        print("   модель думала слишком долго")
+        r = _api("/api/generate", {
+            "model": model, "prompt": prompt, "stream": False, "think": True,
+            "options": {"temperature": 0.2, "num_ctx": 16384},
+        }, timeout=TIMEOUT)
+    except Exception as e:
+        print("   ollama:", str(e)[:300])
         return None
-    if r.returncode != 0:
-        print("   ollama:", (r.stderr or "").strip()[:300])
-        return None
-    return r.stdout.strip()
+    text = (r.get("response") or "").rsplit("</think>", 1)[-1].strip()
+    return text or None
 
 
 def split_text(t: str, size: int = CHUNK) -> list[str]:
@@ -187,12 +213,15 @@ def main() -> int:
         if not models:
             print("ollama не установлен или моделей нет. Поставь:")
             print("  brew install ollama && ollama serve &")
-            print("  ollama pull qwen2.5:7b")
+            print(f"  ollama pull {DEFAULT_LLM}")
             engine = "prompt"
         else:
-            use = model if model in models else models[0]
+            prefer = [m for m in (model, DEFAULT_LLM) if m]
+            use = next((m for m in prefer if m in models), models[0])
             print(f"   локальная модель: {use}")
             body = build_with_ollama(use, text)
+            if body and "## " in body:
+                body = body[body.index("## "):]  # без вступлений перед протоколом
             if body:
                 out = folder / "protocol.md"
                 out.write_text(header(meta, folder) + "\n" + body.strip() + "\n",

@@ -3,6 +3,8 @@
 set -uo pipefail
 HOME_DIR="${PODSLUSHKA_HOME:-$HOME/.podslushka}"
 
+launchctl bootout "gui/$(id -u)/com.podslushka.autostart" 2>/dev/null
+rm -f "$HOME/Library/LaunchAgents/com.podslushka.autostart.plist"
 pkill -x Podslushka 2>/dev/null
 rm -rf "$HOME/Applications/Podslushka.app"
 rm -rf "$HOME_DIR"

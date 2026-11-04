@@ -5,7 +5,7 @@ set -uo pipefail
 HOME_DIR="${PODSLUSHKA_HOME:-$HOME/.podslushka}"
 REC_DIR="${PODSLUSHKA_DIR:-$HOME/Подслушка}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
-MODEL="${PODSLUSHKA_MODEL:-medium}"
+MODEL="${PODSLUSHKA_MODEL:-large-v3-turbo}"
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 ok()   { printf '   %s\n' "$1"; }
@@ -47,6 +47,13 @@ fi
 "$HOME_DIR/venv/bin/pip" install --quiet --upgrade pip || true
 "$HOME_DIR/venv/bin/pip" install --quiet faster-whisper || die "не поставился faster-whisper"
 ok "faster-whisper $("$HOME_DIR/venv/bin/python" -c 'import faster_whisper;print(faster_whisper.__version__)')"
+# На Apple Silicon расшифровка идёт на видеоядре через MLX: large-v3-turbo
+# за секунды на минуту разговора. Не поставилось — работает faster-whisper.
+if [ "$(uname -m)" = "arm64" ]; then
+  "$HOME_DIR/venv/bin/pip" install --quiet mlx-whisper \
+    && ok "mlx-whisper — расшифровка на видеоядре" \
+    || echo "   mlx-whisper не поставился, расшифровка пойдёт на процессоре"
+fi
 
 say "Файлы"
 mkdir -p "$HOME_DIR/bin" "$HOME_DIR/lib" "$HOME_DIR/app" "$REC_DIR"
@@ -66,6 +73,14 @@ else
   echo "   Поставь инструменты разработчика (xcode-select --install) и запусти $HOME_DIR/app/build.sh"
 fi
 
+say "Автозапуск при входе"
+if [ -d "$HOME/Applications/Podslushka.app" ]; then
+  "$HOME_DIR/bin/podslushka" autostart on | sed 's/^/   /'
+  echo "   выключить: podslushka autostart off"
+else
+  echo "   приложения нет — автозапуск пропущен"
+fi
+
 say "Команды в PATH"
 LINKDIR=""
 for d in /usr/local/bin /opt/homebrew/bin; do
@@ -81,8 +96,12 @@ else
   echo "     export PATH=\"\$PATH:$HOME_DIR/bin\""
 fi
 
-say "Модель распознавания ($MODEL, около 1,5 ГБ)"
-CACHE="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-$MODEL"
+say "Модель распознавания ($MODEL, около 1,6 ГБ)"
+if "$HOME_DIR/venv/bin/python" -c 'import mlx_whisper' 2>/dev/null; then
+  CACHE="$HOME/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo"
+else
+  CACHE="$HOME/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo"
+fi
 if [ -d "$CACHE" ]; then
   ok "уже скачана"
   ans=n
@@ -93,8 +112,13 @@ fi
 case "${ans:-y}" in
   [Nn]*) [ -d "$CACHE" ] || echo "   пропущено — скачается сама при первой расшифровке" ;;
   *) "$HOME_DIR/venv/bin/python" - <<PY || echo "   не скачалось, попробуется при первой записи"
-from faster_whisper import WhisperModel
-WhisperModel("$MODEL", device="cpu", compute_type="int8")
+try:
+    import mlx_whisper
+    from huggingface_hub import snapshot_download
+    snapshot_download("mlx-community/whisper-large-v3-turbo")
+except ImportError:
+    from faster_whisper import WhisperModel
+    WhisperModel("$MODEL", device="cpu", compute_type="int8")
 print("   модель на месте")
 PY
   ;;
@@ -102,7 +126,9 @@ esac
 
 say "Точная модель для второго прохода (large-v3, около 3 ГБ)"
 CACHE2="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3"
-if [ -d "$CACHE2" ]; then
+if "$HOME_DIR/venv/bin/python" -c 'import mlx_whisper' 2>/dev/null; then
+  ok "не нужна: на видеоядре первый проход уже точный"
+elif [ -d "$CACHE2" ]; then
   ok "уже скачана"
 else
   echo "   После каждой записи вторым проходом идёт точная расшифровка."
@@ -135,9 +161,10 @@ cat <<'NEXT'
    Посмотреть записи:        podslushka-ui
    Протокол встречи в PDF:   podslushka protocol
 
-   Протокол пишет языковая модель. Полностью офлайн — через ollama:
-     brew install ollama && ollama serve &
-     ollama pull qwen2.5:7b
+   После звонка протокол собирается сам и копируется в ~/Claude/Память/Входящие.
+   Пишет его локальная модель, полностью офлайн — через ollama:
+     brew install ollama && brew services start ollama
+     ollama pull qwen3:30b-a3b
    Без него команда сделает заготовку с расшифровкой, её можно отдать
    любой внешней модели, а ответ положить в protocol.md рядом.
 NEXT
