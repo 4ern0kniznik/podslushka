@@ -6,9 +6,10 @@
         "/Users/yaitskii/Claude/Settings/agents-setup/ispolnitel/server.py"
       ],
       "env": {
-        "ISPOLNITEL_BASE_URL": "http://localhost:11434/v1",
-        "ISPOLNITEL_TIMEOUT": "180",
-        "ISPOLNITEL_MAX_TOKENS": "2000"
+        "ISPOLNITEL_BASE_URL": "http://127.0.0.1:4000/v1",
+        "ISPOLNITEL_TIMEOUT": "300",
+        "ISPOLNITEL_MAX_TOKENS": "2000",
+        "ISPOLNITEL_API_KEY_FILE": "~/.config/ai-gateway/kontora-local.key"
       }
     }
   }
