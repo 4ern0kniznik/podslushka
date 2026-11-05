@@ -50,6 +50,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>Запись звонка: микрофон и звук системы через устройство Podslushka In.</string>
   <key>NSAudioCaptureUsageDescription</key>
   <string>Запись звука звонка.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Кадры слайдов во время записи: хранятся в папке звонка 7 дней.</string>
 </dict>
 </plist>
 PLIST

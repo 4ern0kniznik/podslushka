@@ -455,8 +455,14 @@ final class App: NSObject, NSApplicationDelegate {
             rec.title = "Ждём"
             rec.isEnabled = false
         } else {
-            dot.layer?.backgroundColor = NSColor.systemGray.cgColor
-            label.stringValue = "Готов"
+            // Обработка прошлых записей идёт в фоне очередью (podslushka finish)
+            // и запись не блокирует — только показывается.
+            let fm = FileManager.default
+            let bg = fm.fileExists(atPath: "/tmp/podslushka/transcribe.lock") ? "расшифровка в фоне"
+                   : (fm.fileExists(atPath: "/tmp/podslushka/protocol.lock") ? "протокол в фоне" : nil)
+            dot.layer?.backgroundColor = (bg == nil ? NSColor.systemGray : NSColor.systemOrange).cgColor
+            label.stringValue = bg.map { "Готов · " + $0 } ?? "Готов"
+            label.toolTip = bg == nil ? nil : "Можно начинать следующую запись — прошлая доделается сама"
             rec.title = "Запись"
             rec.isEnabled = true
         }
