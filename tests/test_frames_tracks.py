@@ -174,6 +174,20 @@ check("дорожки: тишина 0–0,8 с — без пометки", t.who
 nocall = Tracks({"step": 0.1, "mic": [-30] * 100, "call": [-90] * 100})
 check("дорожки: без звонка пометок нет", nocall.who(1, 5), None)
 
+# ---------- сторож не уходит за следующей записью ----------
+import callcheck as CC  # noqa: E402
+pidf = tmp / "ffmpeg.pid"
+for mod, name in ((F, "кадры"), (CC, "проверка звонка")):
+    a = subprocess.Popen(["sleep", "30"])
+    pidf.write_text(str(a.pid))
+    first = mod.alive(pidf)
+    a.kill(); a.wait()
+    b = subprocess.Popen(["sleep", "30"])  # следующая запись переписала pid-файл
+    pidf.write_text(str(b.pid))
+    check(f"{name}: сторож видит свою запись, а не следующую", (first, mod.alive(pidf)), (True, False))
+    b.kill(); b.wait()
+    mod._PIDS.clear()
+
 print("\nвсё прошло" if ok else "\nЕСТЬ ПАДЕНИЯ")
 print("рабочая папка:", tmp)
 sys.exit(0 if ok else 1)

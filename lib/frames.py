@@ -154,11 +154,18 @@ def started_at(call: Path) -> float:
         return time.time()
 
 
+_PIDS: dict = {}
+
+
 def alive(pid_file: Path) -> bool:
+    """Жив ли ffmpeg этой записи. Номер читается один раз, при старте сторожа:
+    следующая запись перепишет pid-файл, а сторож старой не должен за ней пойти."""
     try:
-        os.kill(int(pid_file.read_text().strip()), 0)
+        if pid_file not in _PIDS:
+            _PIDS[pid_file] = int(pid_file.read_text().strip())
+        os.kill(_PIDS[pid_file], 0)
         return True
-    except Exception:
+    except (OSError, ValueError):
         return False
 
 

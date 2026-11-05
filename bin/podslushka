@@ -1,8 +1,8 @@
 #!/bin/bash
 # Подслушка — запись звонка и протокол
-# start | stop | status | toggle | doctor | setup | fix-audio | protocol | pdf | after | autostart
+# start | stop | status | toggle | doctor | setup | fix-audio | protocol | pdf | after | finish | autostart
 # Пишет микрофон и звук системы через агрегатное устройство "Podslushka In",
-# после стопа сразу расшифровывает локальным faster-whisper.
+# после стопа расшифровывает в фоне локальным whisper — можно сразу писать дальше.
 
 set -uo pipefail
 
@@ -145,6 +145,10 @@ do_start() {
   notify "" "Идёт запись"
 }
 
+# Стоп только останавливает ffmpeg и ставит запись в очередь на обработку.
+# Сжатие, расшифровка и протокол идут в фоне (do_finish), поэтому панель
+# сразу снова готова к записи: следующую встречу можно начинать, пока
+# расшифровывается предыдущая.
 do_stop() {
   if ! is_running; then echo "запись не идёт"; notify "" "Записи не было"; exit 0; fi
   PID="$(cat "$PID_FILE")"
@@ -158,14 +162,41 @@ do_stop() {
   WAV="$OUT_DIR/audio.wav"
   [ -s "$WAV" ] || { echo "файл пустой: $WAV"; notify "" "Пустой файл"; exit 1; }
 
-  # вывод ffmpeg кладётся рядом с записью — иначе он теряется в /tmp
+  # вывод ffmpeg кладётся рядом с записью — иначе его затрёт следующий старт
   cp -f "$LOG_FILE" "$OUT_DIR/ffmpeg.log" 2>/dev/null
 
-  SIZE=$(du -h "$WAV" | cut -f1)
-  echo "Запись остановлена ($SIZE). Транскрибирую…"
-  notify "" "Стоп. Транскрибирую…"
+  nohup "$0" finish "$OUT_DIR" > "$OUT_DIR/finish.log" 2>&1 &
+  echo "Запись остановлена ($(du -h "$WAV" | cut -f1)): $OUT_DIR"
+  echo "  расшифровка в фоне, журнал: $OUT_DIR/finish.log — можно начинать следующую запись"
+  notify "" "Стоп. Расшифровываю в фоне — можно начинать следующую запись"
+}
 
-  NO_CALL=0
+# Очередь: обработки идут по одной, в порядке остановки. Замок — каталог
+# (mkdir атомарен); замок умершего процесса снимается.
+qlock() {
+  local l="$STATE_DIR/$1.lock" waited=0
+  while ! mkdir "$l" 2>/dev/null; do
+    if [ -f "$l/pid" ] && ! kill -0 "$(cat "$l/pid" 2>/dev/null)" 2>/dev/null; then
+      rm -rf "$l"; continue
+    fi
+    [ "$waited" = 0 ] && echo "--- жду очереди ($1): идёт обработка предыдущей записи"
+    waited=1; sleep 2
+  done
+  echo $$ > "$l/pid"
+}
+qunlock() { rm -rf "$STATE_DIR/$1.lock"; }
+
+do_finish() {
+  local OUT_DIR="${1%/}"
+  local WAV="$OUT_DIR/audio.wav"
+  [ -s "$WAV" ] || { echo "нет записи: $WAV"; return 1; }
+  qlock transcribe
+  trap 'qunlock transcribe' EXIT
+  echo "=== обработка $(date '+%d.%m %H:%M:%S'): $OUT_DIR"
+  local SIZE NO_CALL=0 CH AUDIO
+  SIZE=$(du -h "$WAV" | cut -f1)
+  notify "" "Расшифровываю запись $(basename "$OUT_DIR" | cut -c12-16 | tr - :)"
+
   if [ -f "$CALLCHECK" ]; then
     "$WHISPER_PY" "$CALLCHECK" summary "$WAV"
     [ $? -eq 3 ] && NO_CALL=1
@@ -179,7 +210,7 @@ do_stop() {
   if [ "$CH" -ge 3 ] 2>/dev/null && [ "$NO_CALL" = 0 ] && [ -f "$TRACKS" ]; then
     "$WHISPER_PY" "$TRACKS" envelope "$WAV" "$OUT_DIR/tracks.json" || echo "  дорожки не снялись"
   fi
-  if ffmpeg -v error -y -i "$WAV" -af "$(mix_filter "$CH")" -ac 1 -c:a aac -b:a 64k \
+  if ffmpeg -v error -y -nostdin -i "$WAV" -af "$(mix_filter "$CH")" -ac 1 -c:a aac -b:a 64k \
        -movflags +faststart "$OUT_DIR/audio.m4a"; then
     echo "  сжато: $SIZE → $(du -h "$OUT_DIR/audio.m4a" | cut -f1), каналов свели: $CH"
   else
@@ -191,20 +222,13 @@ do_stop() {
   if ! "$WHISPER_PY" "$TRANSCRIBE" "$AUDIO"; then
     notify "" "Ошибка транскрибации"
     echo "Расшифровка упала, аудио цело: $AUDIO"
-    exit 1
+    return 1
   fi
 
   "$WHISPER_PY" "$PEAKS" "$AUDIO" || echo "  пики не посчитались"
   [ -f "$FRAMES_PY" ] && "$WHISPER_PY" "$FRAMES_PY" attach "$OUT_DIR"
 
   if [ "$KEEP_WAV" != "1" ] && [ "$AUDIO" != "$WAV" ]; then rm -f "$WAV"; fi
-
-  # Дальше всё идёт в фоне одной цепочкой: второй проход точной моделью,
-  # потом протокол по точному тексту. Черновик остаётся рядом.
-  if [ "$SECOND_PASS" != "0" ] || [ "$AUTO_PROTOCOL" = "1" ]; then
-    nohup "$0" after "$OUT_DIR" "$AUDIO" > "$OUT_DIR/after.log" 2>&1 &
-    echo "  дальше в фоне: протокол (и точная расшифровка, если нужна), журнал: $OUT_DIR/after.log"
-  fi
 
   echo "Готово: $OUT_DIR"
   if [ "$NO_CALL" = 1 ]; then
@@ -214,7 +238,18 @@ do_stop() {
   else
     notify "" "Транскрипт готов"
   fi
-  open "$OUT_DIR"
+  # Папку открываем, только если не идёт новая запись: окно Finder посреди
+  # следующей встречи мешает.
+  is_running || open "$OUT_DIR"
+  qunlock transcribe
+  trap - EXIT
+
+  # Протокол — своей очередью: локальная модель думает минутами, а
+  # расшифровка следующей записи ждать её не должна.
+  if [ "$SECOND_PASS" != "0" ] || [ "$AUTO_PROTOCOL" = "1" ]; then
+    echo "--- дальше протокол, журнал: $OUT_DIR/after.log"
+    do_after "$OUT_DIR" "$AUDIO" > "$OUT_DIR/after.log" 2>&1
+  fi
 }
 
 # Цепочка после звонка. $1 — папка звонка, $2 — аудио (по умолчанию audio.m4a).
@@ -225,6 +260,8 @@ do_after() {
   [ -d "$D" ] || { echo "нет папки: $D"; return 1; }
   [ -n "$A" ] || A="$D/audio.m4a"
   [ -f "$A" ] || A="$D/audio.wav"
+  qlock protocol
+  trap 'qunlock protocol' EXIT
   t0=$(date +%s)
   echo "=== цепочка $(date '+%d.%m %H:%M:%S'): $D"
 
@@ -501,6 +538,7 @@ case "${1:-toggle}" in
   protocol) shift; do_protocol "${1:-}"; exit $? ;;
   pdf) shift; do_pdf "${1:-}"; exit $? ;;
   after) shift; do_after "${1:-}" "${2:-}"; exit $? ;;
+  finish) shift; do_finish "${1:-}"; exit $? ;;
   autostart) shift; do_autostart "${1:-status}"; exit $? ;;
   setup) do_setup ;;
   start) do_start ;;
