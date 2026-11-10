@@ -36,11 +36,6 @@ KEEP_WAV="${PODSLUSHKA_KEEP_WAV:-0}"
 AUTO_PROTOCOL="${PODSLUSHKA_AUTO_PROTOCOL:-1}"
 LLM="${PODSLUSHKA_LLM:-qwen3:30b-a3b}"
 INBOX="${PODSLUSHKA_INBOX:-$HOME/Claude/Память/Входящие}"
-# Кадры экрана при смене слайда — в папку звонка, через FRAMES_DAYS дней в
-# Корзину. Выключить: PODSLUSHKA_FRAMES=0.
-FRAMES="${PODSLUSHKA_FRAMES:-1}"
-FRAMES_DAYS="${PODSLUSHKA_FRAMES_DAYS:-7}"
-FRAMES_PY="$HOME_DIR/lib/frames.py"
 TRACKS="$HOME_DIR/lib/tracks.py"
 
 mkdir -p "$STATE_DIR" "$BASE_DIR"
@@ -134,13 +129,6 @@ do_start() {
     nohup "$WHISPER_PY" "$CALLCHECK" live "$OUT_DIR/audio.wav" "$PID_FILE" \
       >> "$LOG_FILE" 2>&1 &
   fi
-  if [ -f "$FRAMES_PY" ]; then
-    # Срок хранения кадров проверяется при каждом старте записи.
-    nohup "$WHISPER_PY" "$FRAMES_PY" clean "$BASE_DIR" "$FRAMES_DAYS" >> "$STATE_DIR/clean.log" 2>&1 &
-    if [ "$FRAMES" = "1" ]; then
-      nohup "$WHISPER_PY" "$FRAMES_PY" watch "$OUT_DIR" "$PID_FILE" > "$OUT_DIR/frames.log" 2>&1 &
-    fi
-  fi
   echo "REC → $OUT_DIR/audio.wav"
   notify "" "Идёт запись"
 }
@@ -226,7 +214,6 @@ do_finish() {
   fi
 
   "$WHISPER_PY" "$PEAKS" "$AUDIO" || echo "  пики не посчитались"
-  [ -f "$FRAMES_PY" ] && "$WHISPER_PY" "$FRAMES_PY" attach "$OUT_DIR"
 
   if [ "$KEEP_WAV" != "1" ] && [ "$AUDIO" != "$WAV" ]; then rm -f "$WAV"; fi
 
@@ -290,7 +277,6 @@ do_after() {
     notify "" "Протокол не собрался — см. after.log в папке звонка"
     return 1
   fi
-  [ -f "$FRAMES_PY" ] && "$WHISPER_PY" "$FRAMES_PY" attach "$D"
   "$WHISPER_PY" "$TOPDF" "$D/protocol.md" "$D/protocol.pdf" >/dev/null 2>&1 || echo "PDF не собрался"
 
   # Имя по времени начала звонка, из имени папки ГГГГ-ММ-ДД_ЧЧ-ММ-СС.
@@ -298,8 +284,7 @@ do_after() {
   if [ -d "$INBOX" ]; then
     copy="$INBOX/${name:0:10}_звонок_${name:11:5}.md"
     [ -e "$copy" ] && copy="$INBOX/${name:0:10}_звонок_${name:11:8}.md"
-    # Кадры экрана в «Память» не идут: она синхронизируется на телефон.
-    { "$WHISPER_PY" "$FRAMES_PY" inbox "$D/protocol.md" 2>/dev/null || cat "$D/protocol.md"; printf '\n---\nИсточник: %s · расшифровка %s · протокол %s\n' \
+    { cat "$D/protocol.md"; printf '\n---\nИсточник: %s · расшифровка %s · протокол %s\n' \
         "$D" "$(sed -n 's/.*"model": "\(.*\)".*/\1/p' "$D/meta.json" 2>/dev/null | head -1)" "$LLM"; } > "$copy"
     echo "копия: $copy"
     notify "" "Протокол готов: $(basename "$copy")"
@@ -374,7 +359,6 @@ do_protocol() {
   local D="$DIR"
   echo "Протокол по $D"
   "$WHISPER_PY" "$PROTOCOL" "$D" || return 1
-  [ -f "$D/protocol.md" ] && [ -f "$FRAMES_PY" ] && "$WHISPER_PY" "$FRAMES_PY" attach "$D"
   if [ -f "$D/protocol.md" ]; then
     "$WHISPER_PY" "$TOPDF" "$D/protocol.md" "$D/protocol.pdf" && open "$D"
   fi
@@ -414,11 +398,6 @@ do_doctor() {
     echo "  нет    модели $LLM в ollama (или сервер не запущен) — ollama pull $LLM"
   else
     echo "  нет    ollama — протокол выйдет заготовкой для внешней модели"
-  fi
-  if [ "$FRAMES" = "1" ]; then
-    echo "  есть   кадры при смене слайда, хранятся $FRAMES_DAYS дн. (нужно разрешение «Запись экрана»)"
-  else
-    echo "  нет    кадров экрана (PODSLUSHKA_FRAMES=0)"
   fi
   if do_autostart status >/dev/null; then echo "  есть   автозапуск при входе"
   else echo "  нет    автозапуска при входе — podslushka autostart on"; fi
