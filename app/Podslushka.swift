@@ -2,8 +2,9 @@
 // Сборка: ./build-app.sh   (нужны Command Line Tools)
 //
 // Приложение не пишет звук само — оно дёргает call-rec.sh, который уже
-// проверен. На себя берёт: панель, таймер, переключение выхода на Podslushka Out
-// и обратно, создание аудиоустройств через CoreAudio и запуск картотеки.
+// проверен. На себя берёт: панель, таймер, кран звука системы на время записи
+// (macOS 14.2+), на старых macOS — переключение выхода на Podslushka Out,
+// создание аудиоустройств через CoreAudio и запуск картотеки.
 
 import AppKit
 import CoreAudio
@@ -761,6 +762,12 @@ final class App: NSObject, NSApplicationDelegate {
     /// В наушниках выход переключается всегда: из динамиков голос собеседника
     /// ловит микрофон, из наушников — никто, кроме BlackHole.
     func start() {
+        // macOS 14.2+: звук системы пишется краном напрямую, выход не трогаем,
+        // Podslushka In/Out не нужны — что бы и куда ни играло, попадёт в запись.
+        if #available(macOS 14.2, *), ProcessInfo.processInfo.environment["PODSLUSHKA_TAP"] != "0" {
+            dbg("старт: звук системы напрямую, выход \(CA.name(CA.defaultOutput)) не трогаем")
+            return launch()
+        }
         guard CA.find(name: "Podslushka In") != nil else {
             return alert("Нет устройства Podslushka In",
                          "Нажми «Создать аудиоустройства» — оно соберёт Podslushka In и Podslushka Out.")
@@ -1027,6 +1034,88 @@ extension App {
         }
         return copy
     }
+}
+
+// MARK: - Звук системы напрямую (macOS 14.2+)
+
+/// `Podslushka --tap-hold <pid-файл>`: собрать устройство «Podslushka Tap In» =
+/// [микрофон, весь звук системы] и держать, пока жив ffmpeg записи. Звук
+/// системы берётся краном Core Audio (process tap) — до выхода, поэтому в запись
+/// попадает любая программа на любом выходе: динамики, наушники, AirPods,
+/// Телемост, Max, браузер. Переключать выход не нужно. Каналы как у
+/// Podslushka In: микрофон первым, звук системы — двумя последними.
+enum TapHold {
+    static let marker = "podslushka-tap-v1"  // по ней podslushka узнаёт новую сборку
+    static let name = "Podslushka Tap In"
+    static let uid = "local.podslushka.tapin"
+
+    static func micUID() -> String? {
+        let want = UserDefaults.standard.string(forKey: "mic") ?? "Микрофон MacBook Pro"
+        if let d = CA.find(name: want), CA.channels(d, input: true) > 0, let u = CA.uid(d) { return u }
+        // Выбранного нет — встроенный микрофон.
+        return CA.inputs().first { CA.isBuiltIn($0) }.flatMap { CA.uid($0) }
+    }
+
+    static func run(pidFile: String) -> Int32 {
+        print(marker)
+        guard #available(macOS 14.2, *) else { print("кран звука нужен macOS 14.2+"); return 4 }
+        guard let mic = micUID() else { print("нет микрофона"); return 1 }
+        if let old = CA.find(name: name) { AudioHardwareDestroyAggregateDevice(old) }
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        desc.name = "Podslushka"
+        desc.isPrivate = false
+        desc.muteBehavior = .unmuted
+        var tap = AudioObjectID(0)
+        var st = AudioHardwareCreateProcessTap(desc, &tap)
+        guard st == noErr else { print("кран не создан: \(st)"); return 2 }
+        let agg: [String: Any] = [
+            kAudioAggregateDeviceNameKey: name,
+            kAudioAggregateDeviceUIDKey: uid,
+            kAudioAggregateDeviceMainSubDeviceKey: mic,
+            kAudioAggregateDeviceIsPrivateKey: false,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: mic]],
+            kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: desc.uuid.uuidString,
+                                               kAudioSubTapDriftCompensationKey: true]],
+        ]
+        var aggID = AudioObjectID(0)
+        st = AudioHardwareCreateAggregateDevice(agg as CFDictionary, &aggID)
+        guard st == noErr else {
+            AudioHardwareDestroyProcessTap(tap)
+            print("устройство не собрано: \(st)"); return 3
+        }
+        func cleanup() {
+            AudioHardwareDestroyAggregateDevice(aggID)
+            AudioHardwareDestroyProcessTap(tap)
+        }
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            signal(sig) { _ in
+                if let d = CA.find(name: TapHold.name) { AudioHardwareDestroyAggregateDevice(d) }
+                exit(0)
+            }
+        }
+        print("ready \(name) (микрофон \(CA.find(uid: mic).map(CA.name) ?? mic))"); fflush(stdout)
+        // Ждём ffmpeg записи (до 20 с), потом держим, пока он жив. Номер
+        // запоминаем один раз: следующая запись перепишет pid-файл.
+        var pid: Int32 = 0
+        for _ in 0..<80 {
+            if let s = try? String(contentsOfFile: pidFile, encoding: .utf8),
+               let p = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)), kill(p, 0) == 0 {
+                pid = p; break
+            }
+            usleep(250_000)
+        }
+        while pid > 0 && kill(pid, 0) == 0 { usleep(500_000) }
+        cleanup()
+        print("убрано"); fflush(stdout)
+        return 0
+    }
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--tap-hold") {
+    let pf = i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1] : "/tmp/podslushka/ffmpeg.pid"
+    exit(TapHold.run(pidFile: pf))
 }
 
 let app = NSApplication.shared

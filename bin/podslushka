@@ -13,6 +13,11 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PA
 
 HOME_DIR="${PODSLUSHKA_HOME:-$HOME/.podslushka}"
 DEVICE_NAME="${PODSLUSHKA_DEVICE:-Podslushka In}"
+# macOS 14.2+: звук системы — краном Core Audio прямо из всех программ, на любом
+# выходе. Приложение собирает на время записи «Podslushka Tap In» = [микрофон,
+# звук системы]. Выключить и писать по-старому через Podslushka In/Out: TAP=0.
+TAP="${PODSLUSHKA_TAP:-1}"
+TAP_NAME="Podslushka Tap In"
 BASE_DIR="${PODSLUSHKA_DIR:-$HOME/Подслушка}"
 STATE_DIR="/tmp/podslushka"
 PID_FILE="$STATE_DIR/ffmpeg.pid"
@@ -58,7 +63,29 @@ mix_filter() {
 find_device_index() {
   ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 \
     | awk '/AVFoundation audio devices/{a=1;next} /AVFoundation video devices/{a=0} a' \
-    | grep -F "$DEVICE_NAME" | head -1 | sed -E 's/.*\[([0-9]+)\].*/\1/'
+    | grep -F "] ${1:-$DEVICE_NAME}" | head -1 | sed -E 's/.*\[([0-9]+)\].*/\1/'
+}
+
+tap_supported() {
+  [ "$TAP" = "1" ] && [ -x "$APP_BIN" ] && grep -aq "podslushka-tap-v1" "$APP_BIN"
+}
+
+# Кран живёт, пока жив процесс приложения, поэтому его держит отдельный
+# «$APP_BIN --tap-hold»: сам разбирает устройство, когда ffmpeg записи завершится.
+# Вывод — номер устройства в списке ffmpeg; пусто — крана нет.
+start_tap() {
+  local i idx
+  rm -f "$PID_FILE"
+  nohup "$APP_BIN" --tap-hold "$PID_FILE" > "$STATE_DIR/tap.log" 2>&1 &
+  echo $! > "$STATE_DIR/tap.pid"
+  for i in $(seq 1 20); do
+    idx="$(find_device_index "$TAP_NAME")"
+    [ -n "$idx" ] && grep -q "^ready" "$STATE_DIR/tap.log" && { echo "$idx"; return 0; }
+    kill -0 "$(cat "$STATE_DIR/tap.pid")" 2>/dev/null || break
+    sleep 0.25
+  done
+  kill "$(cat "$STATE_DIR/tap.pid")" 2>/dev/null
+  return 1
 }
 
 # Мало проверить, что процесс с таким номером жив: после перезагрузки номер
@@ -100,7 +127,16 @@ do_start() {
   command -v ffmpeg >/dev/null \
     || fail "не найден ffmpeg, проверь установку через install.sh"
 
-  IDX="$(find_device_index)"
+  IDX="" MODE="Podslushka In"
+  if tap_supported; then
+    if IDX="$(start_tap)"; then
+      MODE="$TAP_NAME — звук системы напрямую"
+    else
+      IDX=""
+      echo "кран звука системы не собрался ($(tail -1 "$STATE_DIR/tap.log" 2>/dev/null)), пишу через Podslushka In"
+    fi
+  fi
+  [ -n "$IDX" ] || IDX="$(find_device_index)"
   if [ -z "$IDX" ]; then
     fail "не найдено аудиоустройство \"$DEVICE_NAME\", собери его: podslushka setup" \
       "$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 | sed -n '/audio devices/,$p')"
@@ -111,7 +147,7 @@ do_start() {
   echo "$OUT_DIR" > "$CUR_FILE"
   rm -f "$NOCALL_FILE"
 
-  echo "=== старт $(date +%H:%M:%S), устройство [$IDX] $DEVICE_NAME" > "$LOG_FILE"
+  echo "=== старт $(date +%H:%M:%S), устройство [$IDX] $MODE" > "$LOG_FILE"
   nohup ffmpeg -hide_banner -loglevel info -nostdin \
     -f avfoundation -i ":$IDX" \
     -c:a pcm_s16le -ar 48000 \
@@ -379,7 +415,11 @@ do_doctor() {
   check "драйвер BlackHole 2ch"  "test -d /Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver"
   check "python окружения"       "test -x '$WHISPER_PY'"
   check "faster-whisper"         "'$WHISPER_PY' -c 'import faster_whisper'"
-  check "устройство ${DEVICE_NAME}" "test -n \"\$(find_device_index)\""
+  if tap_supported; then
+    echo "  есть   звук системы напрямую (Podslushka In нужен только при PODSLUSHKA_TAP=0)"
+  else
+    check "устройство ${DEVICE_NAME}" "test -n \"\$(find_device_index)\""
+  fi
   check "папка записей"          "test -d '$BASE_DIR' || mkdir -p '$BASE_DIR'"
   echo "  ---- для протоколов, не обязательно ----"
   if "$WHISPER_PY" -c 'import mlx_whisper' >/dev/null 2>&1; then
@@ -411,7 +451,12 @@ do_doctor() {
 # тишина и в запись попадает только микрофон. Состояние звука знает только
 # приложение (CoreAudio), поэтому спрашиваем у него, ничего не переключая.
 doctor_route() {
-  echo "  ---- запись в наушниках ----"
+  echo "  ---- звук звонка ----"
+  if tap_supported; then
+    echo "  есть   звук системы пишется напрямую: любые программы, динамики и наушники,"
+    echo "         выход переключать не нужно (первый раз macOS спросит доступ к звуку системы)"
+    return 0
+  fi
   if [ ! -x "$APP_BIN" ]; then
     echo "  нет    приложения — маршрут звука не проверить, собери: $HOME_DIR/app/build.sh"
     return 0
